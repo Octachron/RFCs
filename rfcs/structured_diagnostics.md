@@ -96,33 +96,118 @@ For instance, if rendered to s-expression, the following error message should lo
 
 ## Requirements
 
-1. Unobstrusive: the new logger should be easy to use
+Discussing with dune developers, the OCaml maintainers, and examining existing
+compilers hook, I have identified five requirement:
+
+1. Unobstrusive 
 2. Versioned with a specified update policy
-3. Independent of specific format
+3. Independent of specific formats
 4. Partially redirectable to specific files
 5. Easily derivable specification for the produced file format
 
-## Structured logging as incremental algebraic data type construction
 
-To better cooperate with other tools, the compiler itself should provide
-machine-readable structured diagnostics. This idea has been
-adopted(\cite{rust},\cite{gcc9},\cite{MSVC},\cite{llvm}) or is under
-consideration (\cite{haskell-9.4},\cite{haskell-json}, \cite{golang}) in many
-compilers.
+## Structured diagnostics as incremental algebraic data types
 
-However, is the file format that important?
-What really matters is that the data is well-structured, in other words
-well-typed. And with GADTs, we can create an embedded versioned algebraic type
-system for diagnostics:
+In order to provide loggers for structured diagnostics that are both independent
+of file formats, and can can output directly on a terminal this RFC proposes to
+describe structured diagnostics using an EDSL for building simple algebraic
+datatype definition.
+
 ```ocaml
+type _ extension = ..
 type 'a typ =
-  | Int: int typ | Doc: doc typ | Option: 'a typ -> 'a option typ
-  | Sum: 'a def -> 'a sum typ | Record: 'id def -> 'id record typ | ...
+  | Unit: unit typ
+  | Bool: bool typ
+  | Int: int typ
+  | String: string typ
+  | List: 'a typ -> 'a list typ
+  | Pair: 'a typ * 'b typ -> ('a * 'b) typ
+  | Triple: 'a typ * 'b typ * 'c typ -> ('a * 'b * 'c) typ
+  | Quadruple: 'a typ * 'b typ * 'c typ * 'd typ ->
+      ('a * 'b * 'c * 'd) typ
+  | Sum: 'a def -> 'a sum typ
+  | Record: 'id def -> 'id record typ
+  | Custom: { id :'b extension; pull: ('b -> 'a); default: 'a typ} ->
+      'b typ
 ```
 
-From that description, we will show how to build various printers for
-diagnostics, enforce a versioning policy, provide logging functions that can
-replace transparently `Format` printers and more.
+A structured diagnostic can them be seen as a simple ADT described by the EDSL.
+The `Custom` constructor and its extension `id` makes it easy to both register
+specialized printers for some fields. For instance, defining the `msg` type
+for error report can be done with
+```
+module Msg = New_record(Vl)(struct let name="error_msg" let update=v1 end)()
+let msg = Msg.new_field v1 "msg" doc
+let msg_loc = Msg.new_field v1 "loc" Loc.ctyp
+let () = Msg.seal v1
+let msg_typ =
+  let pull m = Log.Record.(make [ msg ^= m.txt; msg_loc ^= m.loc ]) in
+  Custom { id = Msg; pull; default = Record Msg.scheme }
+
+```
+and logging an error report on the compiler logger can be done with
+```ocaml
+let log_report log report = log.Log.%[Error_log.key] <- report
+```
+
+Moreover, with this kind of description, the printers for specific formats can be written independently
+using only compiler-libs. Similarly, we can ensure that the description is detailled enough 
+to generate printers, serializers or schemas.
+
+
+## Versioning and covariance for maintainability
+
+An important requirement for structured compiler output is the ability to guarantee a
+sufficient level of backward compatibility to other developer tools.
+
+A basic measure to ensure this is to have versioned schemes and diagnostics.
+This is can be done easily by adding a metadata field to toplevel compiler diagnostics
+which describes the version of the logger used to output the diagnostics.
+
+```json
+  "metadata" : { "version" : [1, 0], "valid" : true},
+```
+
+However, since we are outputting the structured diagnostics incrementally, we cannot guarantee
+at build time that all constructed diagnostics will satisfy the expected schema. Nevertheless,
+we can check at runtime when flushing the diagnostics if it is valid according to the
+scheme for this version.
+
+Adding a version to the type descriptions also makes it easier to enforce a update policy
+between version. The policy proposed in this PR is that
+
+- minor updates are covariant
+- major update only delete deprecated fields
+- logger should support as much as possible the previous major version
+
+In other, a minor update may:
+
+- add new fields from a record type
+- remove constructors from a sum type
+- deprecate a field from a record type
+- promotes an optional field from a record type to a required field
+
+while a major update may:
+
+- remove a deprecated field from a record type
+- add a new constructor to a sum type
+
+With this policy, we can be sure that a logger at version `major.minor` can output
+a structured diagnostic which is valid for any version `major.m` where `m<minor`.
+Indeed this only requires to not output fields from future version.
+
+Enforcing compatibility between major versions is more delicate. In the record
+case, the compiler code will need to keep `deprecated` path to output the now
+deleted fields. However, there are no good options from constructor.
+
+If there is a new constructor in version `major.0`, it is not always possible
+to translate this new constructor to the diagnostic in the previous version.
+We could replace future constructor by a special constructor `<future>`, but it is
+unclear if this would help tools more than having an unknown constructor name.
+
+This means that developer tools will
+
+
 
 ## A document type for structured text
 
@@ -141,17 +226,3 @@ do we update the compiler text format in a lightweight way?
 We shall present how the OCaml compiler has done so by using an
 alternative \mintinline{ocaml}{Format} implementation
 \footnote{\url{https://github.com/ocaml/ocaml/13169}}.
-
-## Versioning and covariance for maintainability
-
-Another requirement for structured compiler output is the ability to guarantee a
-sufficient level of backward compatibility to other developer tools.
-
-We shall show how by weaving a notion of sequence of versions through the
-creations and deletions of both record fields and variant constructors, we can
-ensure that minor updates are covariant: a minor update may only create record
-fields or delete variant constructors. The reverse breaking changes can then be
-relegated to major updates.
-
-Similarly, with our versioned eDSL for compiler diagnostics, we can check at runtime
-that a diagnostic is well-typed for a given version.
