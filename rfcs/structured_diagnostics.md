@@ -119,7 +119,7 @@ compilers hook, I have identified five requirement:
 
   Some part of the OCaml ecosystem prefer S-expressions to JSON. Both format are
   quite similar when seen as text-based serialization format for the algebraic data
-  types that already exist internally.
+  types that already exist internally in the compiler.
 
 4. Redirectable path to specific files
 
@@ -138,33 +138,40 @@ compilers hook, I have identified five requirement:
 An important requirement for structured compiler output is the ability to guarantee a
 sufficient level of backward compatibility to other developer tools.
 
-A basic measure to ensure this is to have versioned schemata and diagnostics.
 An easy first step is to add a metadata field to toplevel compiler diagnostics
 which describes the version of the logger used to output the diagnostics:
+
+```json
+  "metadata" : { "version" : [1, 0] }
+```
+
+However, since we are constructing the structured diagnostics incrementally, we
+cannot guarantee at build time that all constructed diagnostics will satisfy the
+expected schema. 
+
+Thus, I propose to add a runtime check, and a metadata field which confirms that the diagnostic
+is well typed
 
 ```json
   "metadata" : { "version" : [1, 0], "valid" : "Full"},
 ```
 
-However, since we are constructing the structured diagnostics incrementally, we
-cannot guarantee at build time that all constructed diagnostics will satisfy the
-expected schema. Nevertheless, we can check at runtime when writing the
-diagnostics if it is valid according to the scheme for this version.
 
-Adding a version to the type descriptions also makes it easier to enforce a
-update policy between version. The policy that I propose is that
+Beyond a version number, we should enforce a clear update policy for schamata between.
+The policy that I propose is a data-oriented version of semantic versioning:
 
-- minor updates only only refine schemata into a subtype of the previous schema
-- major update may delete deprecated fields or add new constructors
-- logger should support as much as possible the previous major version
+- minor updates can only refine schemata into a subtype of the previous schema
+- major update can delete deprecated fields or add new constructors
 - only one update of diagnostic versions by compiler minor compiler version.
 
 In other, a minor update may:
 
 0. create new record or sum types
-1. add new fields from a record type
-2. deprecate a field from a record type
-3. promote an optional field from a record type to a required field
+
+1. add new fields to a record type
+2. promote an optional field from a record type to a required field
+3. deprecate a field from a record type
+
 4. remove constructors from a sum type
 5. expand the argument type of a variant constructor
 6. introduce a new derived variant constructor
@@ -173,65 +180,65 @@ while a major update may:
 
 0. delete unused records and sum types
 1. remove a deprecated field from a record type
-2. add a new constructor to a sum type
+2. add a new variant constructor to a variant type
 
 With this policy, we can be sure that a logger at version `major.minor` can output
 a structured diagnostic which is valid for any version `major.m` where `m<=minor`.
 Indeed this only requires to:
 
-1. erase fields from future version
+1. erase fields from future versions
 2. project constructors to their previous representation
 
-Enforcing compatibility between major versions is more delicate,
-in particular for the variant constructor side.
+### Record subtyping rule
 
-First, to avoid reuse of previous name with different meaning, we must keep a
-set of tombstones for deleted nominal types, record fields, and sum
-constructors.
+The subtyping rules for records straigthforward
 
-Second, in the record case, the compiler code will need to keep `deprecated` paths to
-output the now deleted fields. This means that a record field may progress from
-versions to versions between:
+1. add new fields to a record type
+2. promote an optional field to a required field
+3. deprecate a field
 
-1. field publication as option
-2. field publication as mandatory
-3. field deprecation
-4. field deletion
+### Variant constructors subtyping rules
 
-Note that this policy already requires than any new diagnostic field is supported
-by at least two OCaml minor versions (and thus one year).
+The constructor rules can be divided in two parts,
+the dual rule for record field addition
 
-Finally, backward-compatibility for variant constructor is more complex.
-If there is a new constructor in version `major.0`, it is not always possible
-to translate this new constructor to the diagnostic in the previous version.
-We could replace future constructor by a special constructor `<future>`, but it is
-unclear if this would help tools more than having an unknown constructor name.
-Thus reliable deserializer would need to parse variant sum as if they were
-always extensible.
+1. remove constructors from a sum type
 
-However to preserve backward compatibility as much as possible,
-we should be able to express whenever a constructor from a version `v2` is in fact
+and the derived constructor rules.
+
+2. expand the argument type of a variant constructor
+3. introduce a new derived variant constructor
+
+The first rule is straigthforward and unsufficient. Indeed, this rule only
+allows us to remove unused clutter, it is not enough to evolve constructor
+fields.
+
+A hackish solution to this issue consists in 
+
+1. duplicate the sum type and update it
+2. deprecate the field containing the offending sum type
+3. add a new field containing the updated sum type.
+
+To avoid this complex dance, we propose to allo reversible update for variant
+constructors: we should be able to expres that a constructor from a version `v2` is in fact
 derived from a constructor from an older version `v1<v2`.
 There two cases that seem relatively straigthforward to handle:
 
 1. A constructor exists in both `v1` and `v2` with only a change of its argument type,
    with the new type being a subtype of the previous one.
+
+For maximal backward compatibibility, we propose to require that the `v2` argument type
+is necessary a record, which contains a `contents` field holding the previous argument.
+
+
 2. A new constructor in `v2` can be approximated by an older constructor in `v1`
 
+With those possibility, the life cycles of variant constructors is then restricted to
 
-Similarly, a variant constructor with a non record
-argument can be expanded into a record argument with a field `contents`
-holding the old argument.
-
-With those possibility, The life cycles of variant constructors is then restricted to
-
-1. inception from a parent variant constructor
+1. derived inception
 2. publication
-3. deprecation
+3. expansion
 4. deletion
-
-and we only will require major version updates when introducing 
-completely new variant constructors.
 
 For instance, one of the sum type presents in compiler diagnostics is the error kind,
 which is represented as:
@@ -261,64 +268,32 @@ type report_kind =
 With the deletion and expansion rule, this change can be done in a minor update.
 
 
-## Structured diagnostics as incremental algebraic data types
+### Beyond major versions
 
-In order to provide loggers for structured diagnostics that are both independent
-of file formats, and can can output directly on a terminal this RFC proposes to
-describe structured diagnostics using an EDSL for building simple algebraic
-datatype definition.
+Enforcing compatibility between major versions is not always possible,
+in particular for the variant constructor side.
 
-For type expressions, we can use a classical GADT EDSL
-```ocaml
-type _ extension = ..
-type 'a typ =
-  | Unit: unit typ
-  | Bool: bool typ
-  | Int: int typ
-  | String: string typ
-  | List: 'a typ -> 'a list typ
-  | Pair: 'a typ * 'b typ -> ('a * 'b) typ
-  | Triple: 'a typ * 'b typ * 'c typ -> ('a * 'b * 'c) typ
-  | Quadruple: 'a typ * 'b typ * 'c typ * 'd typ ->
-      ('a * 'b * 'c * 'd) typ
-  | Sum: 'a def -> 'a sum typ
-  | Record: 'id def -> 'id record typ
-  | Custom: {
-      id :'b extension;
-      pull: (Version.t -> 'b -> 'a);
-      default: 'a typ} -> 'b typ
-```
+First, to avoid reuse of previous name with different meaning, we must keep a
+set of tombstones for deleted nominal types, record fields, and sum
+constructors.
 
-Fresh record or sum type can be then generated by generative functors,
-and populated after the definition to allow recursive definitions.
+Second, in the record case, the compiler code will need to keep `deprecated` paths to
+output the now deleted fields. This means that a record field may progress from
+versions to versions between:
 
+1. field publication as option
+2. field publication as mandatory
+3. field deprecation
+4. field deletion
 
-A structured diagnostic can them be seen as a simple ADT described by the EDSL.
+Note that this policy already requires than any new diagnostic field is supported
+by at least two OCaml minor versions (and thus one year).
 
-The `Custom` constructor and its extension `id` makes it possible to both register
-specialized printers for some fields. For instance, defining the `msg` type
-for error report can be done with
-```
-module Msg = New_record(Vl)(struct let name="error_msg" let update=v1 end)()
-let msg = Msg.new_field v1 "msg" doc
-let msg_loc = Msg.new_field v1 "loc" Loc.ctyp
-let () = Msg.seal v1
-let msg_typ =
-  let pull v m = Log.Record.(make v [ msg ^= m.txt; msg_loc ^= m.loc ]) in
-  Custom { id = Msg; pull; default = Msg.raw_type }
-```
-and logging an error report on the compiler logger can be done with
-
-```ocaml
-let log_report log report = Log.set log Error_log.key report
-```
-or
-```ocaml
-let log_report log report = log.Log.%[Error_log.key] <- report
-```
-
-Moreover, with this kind of description, the printers for specific formats can be written independently
-using only compiler-libs. Similarly, we can ensure that the description is detailled enough 
-to generate printers, serializers or schema.
-
+Finally, backward-compatibility for variant constructor is more complex.
+If there is a new constructor in version `major.0`, it is not always possible
+to translate this new constructor to the diagnostic in the previous version.
+We could replace future constructor by a special constructor `<future>`, but it is
+unclear if this would help tools more than having an unknown constructor name.
+Thus reliable deserializer that expect to work across major version 
+would need to parse variant sum as if they were always extensible.
 
