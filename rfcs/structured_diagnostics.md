@@ -112,13 +112,15 @@ compilers hook, we have identified five requirement:
   If we want the compiler diagnostic to be usable without friction by non-internal tools, we
   should write down which kind of stability guarantee we offer, and have a clear update paths
   for future changes. For instance, one possibility to keep in mind would be the
-  [SARIF](https://sarifweb.azurewebsites.net) specifications.
+  follow [SARIF](https://sarifweb.azurewebsites.net) specifications.
 
 3. Independent of specific formats
 
   Some part of the OCaml ecosystem prefer S-expressions to JSON. Both format are
   quite similar when seen as text-based serialization format for the algebraic data
-  types that already exist internally in the compiler.
+  types that already exist internally in the compiler. A good option here is to
+  provide enough information for compiler-library users to implement their own
+  serialization format.
 
 4. Redirectable to specific files
 
@@ -130,7 +132,8 @@ compilers hook, we have identified five requirement:
 5. Easily derivable specifications
 
   One way to make it easier for external tools to use compiler diagnostics is to
-  ensure that we can easily derive specifications for the diagnostics.
+  ensure that external tools can easily derive specifications for the diagnostics
+  by using compiler-libs.
 
 ## Versioning and subtyping rules for maintainability
 
@@ -157,7 +160,7 @@ that the diagnostic is well typed
 
 In case of invalid or deprecated diagnostics, we propose to report those invalid
 fields. For instance, if the parsetree output was made compulsory by accident,
-but ended up being absent
+but ended up being absent in the actual diagnostic:
 
 ```json
   "metadata" : { "version" : [1, 0], "valid" : "Full", invalid_paths : [["debug", "parsetree"]]},
@@ -166,12 +169,39 @@ but ended up being absent
 
 Beyond a version number, we should enforce a clear update policy for schamata
 between. The policy that we propose is a data-oriented version of semantic
-versioning:
+versioning for algebraic data types.
 
 - minor updates can only refine schemata into a subtype of the previous schema
 - major update can delete deprecated fields from record type or add new
   constructors to sum type.
 - only one update of diagnostic versions by compiler minor compiler version.
+
+Then a versioned and structured diagnostic can be seen as an algebraic data types annotated
+with versioning and evolution annotation. For instance, for an hypothetical
+future history of the `error_report` data type, we could have:
+
+```ocaml
+type error_report = 
+  { kind: error_kind [@published (1,0)];
+    main: msg [@published (1,0)];
+    sub: msg list
+    [@published (1,0)]
+    [@deprecated (1,1)]
+    [@deleted (2,0)]; 
+   }
+type error_kind =
+  | Error of string [@published (1,0)]
+  | Warning of
+      { contents:string; number:int; name:string; as_error:bool }
+      [@published (1,0)] [@expanded (1,1)]
+  | Warning_as_error of string [@published (1,1)] [@deleted (1,1)]
+  | Alert of
+      { contents:string; as_error:bool }
+      [@published (1,0)] [@expanded (1,1)]
+  | Alert_as_error of string  [@published (1,0)] [@deleted (1,1)]
+  | Fatal of string [@derived Error (1,1)][@published (2,0)]
+...
+```
 
 With this policy, we can ensure that a logger at version `major.minor` can
 output a structured diagnostic for any version `major.prev` where `prev<=minor`.
@@ -179,20 +209,14 @@ by coercing the diagnostic at version `major.minor` into its subtype at version
 `major.prev`.
 
 ## Subtyping rules for minor updates
-In other words, a minor update may:
 
-0. create new record or sum types
-1. add new fields to a record type
-2. promote an optional field from a record type to a required field
-3. deprecate a field from a record type
-
-4. remove constructors from a sum type
-5. expand the argument type of a variant constructor
-6. introduce a new derived variant constructor 
+We propose two group of subtyping rules, one for variant, another for record
+to account for their opposite polarity.
 
 ### Record subtyping rule
 
-The subtyping rules for records are straightforward
+The subtyping rules for records are straightforward because we can
+easily elide fields from future versions:
 
 1. add new fields to a record type
 2. promote an optional field to a required field
@@ -202,8 +226,8 @@ The two last rules only has effects in term of schema for the diagnostics.
 
 ### Variant constructors subtyping rules
 
-The constructor rules can be divided in two parts, the dual rule for record
-field addition
+The constructor rules are more complex and can be divided in two parts, the dual
+rule for record field addition
 
 1. remove constructors from a sum type
 
@@ -224,7 +248,7 @@ type. In this case, we can
 3. deprecate the `f_old` field containing the previous sum type
 4. add a new field `f_new` containing the updated copy of the sum type.
 
-Note that this works only if we can fill out thedeprecated field `f_old` from
+Note that this works only if we can fill out the deprecated field `f_old` from
 the new content in `f_new` in all circumstances.
 
 In other words, this require us to have a projection between the new
