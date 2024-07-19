@@ -49,8 +49,9 @@ that would rather render the error message in another text shape, with another
 styling context.
 
 The aim of this RFCs is to add structured diagnostics to the compiler as a way
-to render the internal compiler ADT in any structured file formats. For
-instance, if rendered to s-expressions, the following error message should look
+to render the internal compiler ADT in any structured file formats and write
+down which backward compatibility guarantee we will offer in the future.
+For instance, if rendered to s-expressions, the following error message should look
 like
 
 ```lisp
@@ -163,7 +164,7 @@ fields. For instance, if the parsetree output was made compulsory by accident,
 but ended up being absent in the actual diagnostic:
 
 ```json
-  "metadata" : { "version" : [1, 0], "valid" : "Full", invalid_paths : [["debug", "parsetree"]]},
+  "metadata" : { "version" : [1, 0], "valid" : "Full", invalid_paths : [["debug", "parsetree"]] },
 ```
 
 
@@ -222,7 +223,9 @@ easily elide fields from future versions:
 2. promote an optional field to a required field
 3. deprecate a field
 
-The two last rules only has effects in term of schema for the diagnostics.
+The first rule only require to delete fields when coercing a newer version to an
+older one and the last two rules only have effects on the schema of diagnostics
+and do not affect coercion.
 
 ### Variant constructors subtyping rules
 
@@ -236,9 +239,9 @@ and the derived constructor rules
 2. expand the argument type of a variant constructor
 3. introduce a new derived variant constructor
 
-The first rule is straightforward and insufficient. Indeed, this rule only
-allows us to remove unused clutter, with no room to evolve sum types without a
-new major version.
+The first rule is straightforward, and correspond to an identity coercion. It is
+also insufficient by itself. Indeed, this rule only allows us to remove unused
+clutter, with no room to evolve sum types without a new major version.
 
 A hackish solution do exist when the sum type appears inside a field of a record
 type. In this case, we can
@@ -267,7 +270,7 @@ There are two cases that seem relatively straightforward to handle:
 1. A constructor `c` exists in both `v1 < v2` with only a change of its argument type,
    with the argument new type being a subtype of the previous one.
 
-For maximal backward compatibility, we propose to require that the `v2` argument type
+For maximal backward compatibility, we could require that the `v2` argument type
 is necessary a record, which contains a `contents` field holding the previous argument.
 
 
@@ -320,10 +323,10 @@ of the diagnostics, we may
 
 
 With those changes, enforcing compatibility between major versions is not always
-possible, in particular for the variant constructor side but we should give some
-long term guarantees.
+possible, in particular for the variant constructor side.
+However, we can afford some long term guarantees.
 
-First, to avoid reuse of previous name with different meaning, we must keep a
+First, to avoid reuse of previous names with different meaning, we must keep a
 set of tombstones for deleted nominal types, record fields, and sum
 constructors.
 
@@ -338,8 +341,8 @@ year and half.
 
 
 Third, backward-compatibility for variant constructor is more complex. If there
-is a new constructor in version `major.0`, it is not always possible to
-translate this new constructor to the diagnostic in the previous version. We
+is a completely new constructor in version `major.0`, it is not always possible
+to translate this new constructor to the diagnostic in the previous version. We
 could replace future constructor by a special constructor `<future>`, but it is
 unclear if this would help tools more than having an unknown constructor name.
 Thus reliable deserializer that expect to work across major version would need
@@ -348,5 +351,5 @@ to parse variant sum as if they were always extensible.
 
 Finally, in order to keep track of all version subtypes, we propose to keep an
 append-only history of the diagnostic schemata. However, it seems sensible to
-enforce this append-only property of this history at a meta-level by commiting
+enforce this append-only property of this history at a meta-level by committing
 the history of the diagnostic to the OCaml testsuite.
